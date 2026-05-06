@@ -72,3 +72,95 @@ Fallback: Server-Sent Events at `/api/v1/notifications/stream`.
 ### Summary of above
 
 - POST create, GET list, PATCH read, DELETE remove, WebSocket for live push.
+
+---
+
+## Stage 2
+
+### Database choice
+
+Using **PostgreSQL** (SQL). Why? We need fast lookups by `studentId` and `isRead`, pagination, and complex filtering. SQL indexes handle this well. Also easier to maintain consistency. NoSQL would be overkill and harder to query.
+
+### Schema
+
+```sql
+CREATE TABLE notifications (
+  id SERIAL PRIMARY KEY,
+  student_id INT NOT NULL,
+  type ENUM ('Placement', 'Result', 'Event') NOT NULL,
+  title VARCHAR(255) NOT NULL,
+  message TEXT,
+  priority ENUM ('low', 'medium', 'high') DEFAULT 'medium',
+  is_read BOOLEAN DEFAULT false,
+  created_at TIMESTAMP UTC DEFAULT NOW(),
+  updated_at TIMESTAMP UTC DEFAULT NOW(),
+  metadata JSONB,
+  FOREIGN KEY (student_id) REFERENCES students(id)
+);
+
+CREATE INDEX idx_student_id_created_at ON notifications(student_id, created_at DESC);
+CREATE INDEX idx_student_id_is_read ON notifications(student_id, is_read);
+CREATE INDEX idx_student_id_type ON notifications(student_id, type);
+```
+
+### Scale problems & solutions
+
+**Problem**: List queries slow down with large volume of notifications across large number of students
+
+- **Solution**: Indexes on `(student_id, created_at)` and `(student_id, is_read)` : covered queries.
+
+**Problem**: Pagination becomes slow with large cursor offsets.
+
+- **Solution**: Usnig keyset pagination: `WHERE student_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT 20`.
+
+**Problem**: Mark all as read for 1 student touches many rows.
+
+- **Solution**: Batch updates, or soft-delete with archive flag instead.
+
+**Problem**: Storage grows fast with metadata JSONB.
+
+- **Solution**: Archive old notifications to a separate table yearly, keep hot data in main table.
+
+### Queries based on Stage 1
+
+List notifications for student (with pagination):
+```sql
+SELECT * FROM notifications 
+WHERE student_id = 1042 AND is_read = false 
+ORDER BY created_at DESC 
+LIMIT 20;
+```
+
+Mark as read:
+```sql
+UPDATE notifications 
+SET is_read = true, updated_at = NOW() 
+WHERE id = 'ntf_91a8f2';
+```
+
+Mark all as read:
+```sql
+UPDATE notifications 
+SET is_read = true, updated_at = NOW() 
+WHERE student_id = 1042 AND is_read = false;
+```
+
+List by type:
+```sql
+SELECT * FROM notifications 
+WHERE student_id = 1042 AND type = 'Placement' 
+ORDER BY created_at DESC 
+LIMIT 20;
+```
+
+Delete:
+```sql
+DELETE FROM notifications WHERE id = 'ntf_91a8f2';
+```
+
+Count unread by type:
+```sql
+SELECT type, COUNT(*) FROM notifications 
+WHERE student_id = 1042 AND is_read = false 
+GROUP BY type;
+```
