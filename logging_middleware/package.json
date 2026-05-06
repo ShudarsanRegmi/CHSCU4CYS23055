@@ -3,8 +3,15 @@
   "version": "1.0.0",
   "description": "Reusable logging middleware for Notification System",
   "main": "src/index.js",
+  "exports": {
+    ".": {
+      "require": "./src/index.js",
+      "import": "./src/browser.mjs"
+    }
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "stage6": "node stage6-demo.js"
   },
   "keywords": [
     "logging",
