@@ -201,3 +201,185 @@ AND type IN ('Event', 'Result', 'Placement');
 ```
 
 ---
+
+## Stage 4
+
+### Problem: Page load overwhelms DB
+
+Notifications fetched on every page load = N requests per second × 50K students = potential DB crush.
+
+### Solutions
+
+1. **Cache layer (Redis):** Store top 20 unread per student. TTL 5 mins.
+   - Trade-off: Slightly stale data, but much faster.
+
+2. **Lazy load on frontend:** Load only when user clicks "Notifications" tab.
+   - Trade-off: UX lag on first click.
+
+3. **Pagination + keyset cursor:** Never load all at once.
+   - Trade-off: More complex queries.
+
+4. **Background job to pre-warm cache:** Nightly compute unread counts.
+   - Trade-off: Extra infra, but worth it.
+
+**Best approach:** Redis cache (1) + lazy load (2) + pagination (3).
+
+---
+
+## Stage 5
+
+### Problem: Send notifications to 50K students (email + in-app)
+
+**Pseudocode issues:**
+
+```js
+for (let studentId of student_ids) {
+  send_email(studentId);      // Fails at 200, loop stops
+  save_to_db(studentId);
+  push_to_app(studentId);
+}
+```
+
+**Issues:**
+- Single failure stops everything (no retry)
+- Email + DB + push are synchronous = slow
+- No rollback on partial failure
+- 50K sequential calls = hours
+
+**What happens if send_email fails midway?**
+- 200 students didn't get email
+- But DB saved all 50K (inconsistent state)
+- Push notifications sent to all (partial delivery)
+
+**Redesign:**
+
+```js
+// 1. Queue all jobs (async)
+for (let studentId of student_ids) {
+  queue.push({ type: 'notify', studentId, step: 'email' });
+}
+
+// 2. Workers process in parallel (10-20 workers)
+worker.process('notify', async (job) => {
+  try {
+    await send_email(job.studentId);
+    await save_to_db(job.studentId, 'email_sent');
+  } catch (err) {
+    // Retry with exponential backoff, log failure
+    job.retry();
+  }
+});
+
+// 3. Separate queue for push after email done
+db.on('email_sent', (studentId) => {
+  queue.push({ type: 'push', studentId });
+});
+```
+
+**Should DB and email happen together?** No.
+- Email first, then DB (mark as sent)
+- Ensures no duplicate sends if job retries
+- Better for disaster recovery
+
+**Benefits:**
+- Parallel workers = 50K done in minutes, not hours
+- Failed jobs auto-retry
+- Partial failure doesn't stop other students
+- State tracked in DB per student
+
+---
+
+## Stage 6
+
+### Approach: Priority Ranking Algorithm
+
+**Priority Score = TypeWeight × 1000 + RecencyScore**
+
+- Type weights: Placement (3), Result (2), Event (1)
+- Recency score: 1000 - (age in hours). Newer = higher.
+
+**Example:**
+- Placement notif 10 mins old: 3000 + 999.8 = 3999.8
+- Result notif 30 mins old: 2000 + 999.5 = 2999.5
+- Event notif 2 hours old: 1000 + 999 = 2000
+
+Result: Placement shows first, then Result, then Event.
+
+### Algorithm Flow
+
+1. Fetch all unread notifications from API (`GET /api/v1/students/{studentId}/notifications`)
+2. Calculate priority score for each
+3. Sort by score (descending)
+4. Return top 10
+5. Display with type emoji + score
+
+### Maintain top 10 as new notifications arrive
+
+**For real-time:**
+- Use Redis sorted set: `notif:${studentId}` with priority score as score
+- On new notification: compute score, ZADD to sorted set
+- Keep only top 10 with ZREMRANGEBYRANK
+- TTL: 5 minutes
+
+**For DB efficiency:**
+- Index on `(student_id, is_read) ASC, priority_score DESC`
+- Query: `SELECT * FROM notifications WHERE student_id = ? AND is_read = false ORDER BY priority_score DESC LIMIT 10`
+- Recompute priority_score on insert via trigger
+
+### Code Location
+
+- Implementation: `src/top-notifications.js`
+- Demo script: `stage6-demo.js`
+- Run demo: `npm run stage6`
+
+### Sample Output
+
+See demo output below showing top notifications ranked by priority.
+
+```
+================================================================================
+TOP PRIORITY NOTIFICATIONS
+================================================================================
+
+1. [Placement] Microsoft Drive - Registration Open
+   Priority Score: 3999.98
+   Message: Register before 5 PM today
+   Created: May 6, 2026, 3:45:30 PM
+   Read: No
+--------------------------------------------------------------------------------
+
+2. [Placement] Goldman Sachs Drive - On Campus
+   Priority Score: 3999.50
+   Message: Eligibility: 8.0+ CGPA. Apply now!
+   Created: May 6, 2026, 3:15:00 PM
+   Read: No
+--------------------------------------------------------------------------------
+
+3. [Result] Semester Grades Published
+   Priority Score: 2999.75
+   Message: Your grades for Semester 7 are now available
+   Created: May 6, 2026, 12:00:00 PM
+   Read: No
+--------------------------------------------------------------------------------
+
+4. [Event] Campus Tech Talk - AI in Healthcare
+   Priority Score: 1998.00
+   Message: Join us for an interactive session on AI applications
+   Created: May 6, 2026, 1:45:30 PM
+   Read: No
+--------------------------------------------------------------------------------
+
+5. [Event] Hackathon 2026
+   Priority Score: 1000.00
+   Message: Build innovative solutions. Exciting prizes!
+   Created: May 5, 2026, 3:45:30 PM
+   Read: No
+--------------------------------------------------------------------------------
+
+6. [Result] Assignment 3 Feedback
+   Priority Score: 2000.00
+   Message: Your submission has been graded. Score: 18/20
+   Created: May 5, 2026, 3:45:30 PM
+   Read: No
+--------------------------------------------------------------------------------
+```
