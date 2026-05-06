@@ -21,7 +21,7 @@ Rules: use lowercase nouns, normal HTTP methods, camelCase JSON, UTC ISO timesta
 Body:
 
 ```json
-{ "studentId": 1042, "type": "Placement", "title": "New placement drive announced", "message": "afford medical will visit campus next week.", "priority": "high", "metadata": { "source": "placement-office", "targetGroup": "final-year" } }
+{ "studentId": 1042, "type": "Placement", "title": "New placement drive announced", "message": "some company will visit campus next week.", "priority": "high", "metadata": { "source": "placement-office", "targetGroup": "final-year" } }
 ```
 
 Returns `201 Created` with the saved notification.
